@@ -590,8 +590,9 @@ describe("Task persistence", () => {
 				task.dispose()
 
 				await expect(waiting).resolves.toBe(false)
+				await vi.runAllTimersAsync()
+				expect(mockSaveApiMessages).toHaveBeenCalledTimes(1)
 			} finally {
-				vi.clearAllTimers()
 				vi.useRealTimers()
 			}
 		})
