@@ -416,6 +416,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	private resolveAssistantMessagePersistence!: (result: AssistantMessagePersistenceResult) => void
 	private assistantMessagePersistenceCancellation?: AssistantMessagePersistenceCancellation
 	private completionPersistenceReadyPromise?: Promise<boolean>
+	private assistantMessageRetryTimeoutHandle?: NodeJS.Timeout
 
 	/**
 	 * Fire-and-forget wrapper around `presentAssistantMessage` that swallows the
@@ -933,6 +934,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return false
 	}
 
+	/**
+	 * Clears the pending action metadata after its durable result is saved.
+	 * Reconciles in-memory state with the task history store to avoid clearing a newer action.
+	 */
 	private async clearPendingActionAfterDurableResult(actionId: string): Promise<void> {
 		if (this.pendingAction?.actionId !== actionId) {
 			return
@@ -958,6 +963,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 	}
 
+	/**
+	 * Processes a queued ask response and determines if a durable acknowledgment is needed.
+	 * Returns the message ID if persistence is required, otherwise removes the message and returns undefined.
+	 */
 	private handleQueuedAskResponse(message: QueuedMessage, resolution: QueuedAskResolution): string | undefined {
 		this.handleWebviewAskResponse(resolution.response, message.text, message.images)
 		if (resolution.requiresDurableAck) {
@@ -991,7 +1000,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return readApiMessages({ taskId: this.taskId, globalStoragePath: this.globalStoragePath })
 	}
 
-	/** Appends an API turn and records whether an assistant turn reached persistent storage. */
+	/**
+	 * Appends an API turn and records whether an assistant turn reached persistent storage.
+	 * If the message resolves a pending action, retries the save on initial failure before clearing the action.
+	 */
 	private async addToApiConversationHistory(message: Anthropic.MessageParam, reasoning?: string): Promise<void> {
 		const resolvesPendingAction =
 			this.pendingAction &&
@@ -1054,6 +1066,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 	/** Settles persistence waiters when the task or current stream generation ends. */
 	private cancelAssistantMessagePersistence(): void {
+		if (this.assistantMessageRetryTimeoutHandle !== undefined) {
+			clearTimeout(this.assistantMessageRetryTimeoutHandle)
+			this.assistantMessageRetryTimeoutHandle = undefined
+		}
 		this.resolveAssistantMessagePersistence?.("cancelled")
 		this.assistantMessagePersistenceCancellation?.resolve()
 	}
@@ -1091,6 +1107,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 	// For API requests, consecutive same-role messages are merged via mergeConsecutiveApiMessages()
 	// so rewind/edit behavior can still reference original message boundaries.
 
+	/** Replaces the entire API conversation history and persists the new state. */
 	async overwriteApiConversationHistory(newHistory: ApiMessage[]) {
 		this.apiConversationHistory = newHistory
 		await this.saveApiConversationHistory()
@@ -1175,6 +1192,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		return saved
 	}
 
+	/** Persists the current API conversation history to disk, returning false on I/O errors. */
 	private async saveApiConversationHistory(): Promise<boolean> {
 		try {
 			await saveApiMessages({
@@ -1205,15 +1223,22 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		const delays = [100, 500, 1500]
 
 		for (let attempt = 0; attempt < delays.length; attempt++) {
+			// Check cancellation before each retry delay
+			if (cancellation?.cancelled) return "cancelled"
+
 			if (cancellation) {
 				const delayCompleted = await new Promise<boolean>((resolve) => {
 					let settled = false
 					const finish = (completed: boolean) => {
 						if (settled) return
 						settled = true
+						if (this.assistantMessageRetryTimeoutHandle !== undefined) {
+							this.assistantMessageRetryTimeoutHandle = undefined
+						}
 						resolve(completed)
 					}
 					const timer = setTimeout(() => finish(true), delays[attempt])
+					this.assistantMessageRetryTimeoutHandle = timer
 					void cancellation.promise.then(() => {
 						clearTimeout(timer)
 						finish(false)
@@ -1223,6 +1248,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 			} else {
 				await new Promise<void>((resolve) => setTimeout(resolve, delays[attempt]))
 			}
+
+			// Check cancellation before each save attempt
+			if (cancellation?.cancelled) return "cancelled"
+
 			console.warn(
 				`[Task#${this.taskId}] retrySaveApiConversationHistory: retry attempt ${attempt + 1}/${delays.length}`,
 			)
@@ -1240,10 +1269,15 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 
 	// Cline Messages
 
+	/** Reads the persisted Cline messages from disk for this task. */
 	private async getSavedClineMessages(): Promise<ClineMessage[]> {
 		return readTaskMessages({ taskId: this.taskId, globalStoragePath: this.globalStoragePath })
 	}
 
+	/**
+	 * Appends a new Cline message, posts it to the webview, emits an event, and persists.
+	 * Partial messages and unanswered asks are flushed immediately to the webview.
+	 */
 	private async addToClineMessages(message: ClineMessage) {
 		this.clineMessages.push(message)
 		const provider = this.providerRef.deref()
@@ -1277,6 +1311,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 	}
 
+	/**
+	 * Replaces the entire Cline message history, restores todo state, and persists.
+	 * Also resets cloud sync tracking to avoid re-syncing previously synced messages.
+	 */
 	public async overwriteClineMessages(newMessages: ClineMessage[]) {
 		this.clineMessages = newMessages
 		restoreTodoListForTask(this)
@@ -1292,6 +1330,10 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 	}
 
+	/**
+	 * Updates a Cline message in the webview and emits an event.
+	 * Non-partial messages are synced to cloud telemetry if not already synced.
+	 */
 	private async updateClineMessage(message: ClineMessage) {
 		const provider = this.providerRef.deref()
 		await provider?.postMessageToWebview({ type: "messageUpdated", clineMessage: message })
@@ -1311,6 +1353,7 @@ export class Task extends EventEmitter<TaskEvents> implements TaskLike {
 		}
 	}
 
+	/** Persists Cline messages and updates task metadata in the history store. Returns false on failure. */
 	private async saveClineMessages(): Promise<boolean> {
 		try {
 			await saveTaskMessages({
