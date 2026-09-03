@@ -24,6 +24,7 @@ import {
 	parseVitestTestFiles,
 	preferDirectTestFiles,
 	resolveVitestBinary,
+	shouldUseVitestRelated,
 	packageForPath,
 	runManifest,
 	selectFromGit,
@@ -207,6 +208,32 @@ describe("preferDirectTestFiles", () => {
 			"webview-ui/src/utils/__tests__/path-mentions.test.ts",
 		])
 		assert.deepEqual(preferDirectTestFiles(related, ["webview-ui/src/utils/unmatched.ts"]), related)
+	})
+
+	it("matches direct tests case-insensitively with dot and hyphen suffixes", () => {
+		const related = [
+			"core/task/__tests__/Task.persistence.spec.ts",
+			"core/tools/__tests__/attemptCompletionTool.spec.ts",
+			"extension/__tests__/api-task-conversation-history-length.spec.ts",
+			"core/task/__tests__/unrelated.spec.ts",
+		]
+
+		assert.deepEqual(
+			preferDirectTestFiles(related, [
+				"core/task/Task.ts",
+				"core/tools/AttemptCompletionTool.ts",
+				"extension/api.ts",
+			]),
+			related.slice(0, 3),
+		)
+	})
+})
+
+describe("shouldUseVitestRelated", () => {
+	it("does not re-filter an explicit discovered test list", () => {
+		assert.equal(shouldUseVitestRelated({ testFiles: ["focused.spec.ts"] }), false)
+		assert.equal(shouldUseVitestRelated({ testFiles: [], vitestRelated: true }), true)
+		assert.equal(shouldUseVitestRelated({ vitestRelated: false }), false)
 	})
 })
 
