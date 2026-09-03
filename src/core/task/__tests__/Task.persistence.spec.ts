@@ -791,6 +791,7 @@ describe("Task persistence", () => {
 				task.dispose()
 
 				await expect(waiting).resolves.toBe(false)
+				expect(task.assistantMessageSavedToHistory).toBe(false)
 				await vi.runAllTimersAsync()
 
 				expect(mockSaveApiMessages).toHaveBeenCalledTimes(1)
