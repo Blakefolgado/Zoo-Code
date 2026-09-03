@@ -91,7 +91,7 @@ jobs:
             - name: Check types
               run: pnpm check-types
             - name: Model-check task lifecycle
-              run: pnpm lifecycle:model
+              run: pnpm model-check
 
     build-vsix:
         name: Build test VSIX

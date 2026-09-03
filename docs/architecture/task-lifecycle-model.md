@@ -3,10 +3,12 @@
 Zoo Code checks its persisted task delegation lifecycle with a bounded, exhaustive state explorer. Run it locally with:
 
 ```sh
-pnpm lifecycle:model
+pnpm model-check
 ```
 
-The check runs in the `compile` CI job after type checking. It fails if it finds an invariant violation, a modeled action becomes unreachable, a named semantic landmark disappears, or exploration exceeds its declared state budget. A violation includes the shortest breadth-first event trace, every intermediate state, and the active bounds so the sequence can be replayed as a focused regression test. The command generates no checked-in artifacts; its reports and counterexamples are written to standard output. `pnpm lifecycle:model-check` remains as a compatibility alias.
+The check runs in the `compile` CI job after type checking. It fails if it finds an invariant violation, a modeled action becomes unreachable, a named semantic landmark disappears, or exploration exceeds its declared state budget. A violation includes the shortest breadth-first event trace, every intermediate state, and the active bounds so the sequence can be replayed as a focused regression test. The command generates no checked-in artifacts; its reports and counterexamples are written to standard output.
+
+`pnpm model-check` preserves the task lifecycle and shared-store checkers with their original state spaces, actions, invariants, landmarks, and reports, then appends the completion persistence explorer to the same command and output stream.
 
 ## Why an executable TypeScript model
 
@@ -39,7 +41,7 @@ Production completion also accepts a recovery-compatible `active` parent that st
 
 ## Shared-store concurrency model
 
-The same `pnpm lifecycle:model` command also runs a second bounded explorer over two `TaskHistoryStore` hosts. It imports the production `computeHistoryDelta` and `mergeHistoryDelta` functions, so its semantics match the store rather than assuming coherent caches or transactional pair writes:
+The same `pnpm model-check` command also runs a second bounded explorer over two `TaskHistoryStore` hosts. It imports the production `computeHistoryDelta` and `mergeHistoryDelta` functions, so its semantics match the store rather than assuming coherent caches or transactional pair writes:
 
 - each host has an independent cache and host-local mutex;
 - store read/update operations hold the host mutex, while live-task snapshots used by completion and message saves may outlive it;
