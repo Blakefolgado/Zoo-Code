@@ -49,6 +49,12 @@ const inFlightRefresh = new Map<string, Promise<ModelRecord>>()
 // provider fetch. Keyed on the same compound cache key as authSessionCache.
 const inFlightAuthScopedFetch = new Map<string, Promise<ModelRecord>>()
 
+// Generation counter per auth-scoped PROVIDER. Bumped on sign-out invalidation so that an
+// in-flight fetch that started before sign-out can detect that the session was invalidated
+// and avoid re-populating the cache with stale data. Keyed by provider (not cache key)
+// because the cache entry may not exist yet when sign-out occurs.
+const authScopedClearGeneration = new Map<AuthScopedProvider, number>()
+
 // Cache keys (see getCacheKey) for which we've already reported an empty model response this
 // session. A persistently-empty endpoint (e.g. misconfigured server) would otherwise re-fire this
 // event on every cache refresh; gate it to at most once per distinct provider+server+key identity
@@ -204,6 +210,12 @@ export function clearAuthSessionModelsForProvider(provider: RouterName): void {
 			inFlightAuthScopedFetch.delete(key)
 		}
 	}
+	// Bump generation so in-flight fetches that started before this clear
+	// know they should not write back stale data. Keyed by provider (not cache key)
+	// because the cache entry may not exist yet when sign-out occurs.
+	if (isAuthScopedProvider(provider)) {
+		authScopedClearGeneration.set(provider, (authScopedClearGeneration.get(provider) ?? 0) + 1)
+	}
 }
 
 type AuthScopedFetchResult = {
@@ -252,6 +264,11 @@ async function resolveAuthScopedModels(
 		return existingFlight
 	}
 
+	// Capture generation before starting the fetch so we can detect if a sign-out occurred
+	// between when we started and when we try to write back results.
+	const authProvider = provider as AuthScopedProvider
+	const generationAtStart = authScopedClearGeneration.get(authProvider) ?? 0
+
 	const fetchPromise = (async () => {
 		try {
 			const fetched = await fetchAuthScopedModelsFromProvider(
@@ -273,7 +290,10 @@ async function resolveAuthScopedModels(
 				if (modelCount > 0) {
 					// Guard against re-populating the cache after a sign-out invalidated
 					// this key between when we started the fetch and when it resolved.
-					if (inFlightAuthScopedFetch.has(cacheKey)) {
+					// Check both: (1) the in-flight promise is still ours, and (2) no sign-out
+					// bumped the generation while we were fetching.
+					const generationNow = authScopedClearGeneration.get(authProvider) ?? 0
+					if (inFlightAuthScopedFetch.has(cacheKey) && generationNow === generationAtStart) {
 						setAuthSessionEntry(cacheKey, fetched.models, fetched.etag)
 						reportedEmptyModelResponse.delete(cacheKey)
 					}
